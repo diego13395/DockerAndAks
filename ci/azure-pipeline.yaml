@@ -1,0 +1,129 @@
+trigger: 
+  - main  
+
+variables: 
+  connectionName: 'DS ARM'
+  dockerConn: 'DSDEMO'
+  vmImageName: 'ubuntu-latest'
+  rgName: 'rg-aks'
+  registryName: 'dsdemocr'
+  location: 'southeastasia'
+  clusterName: 'dsdemoaks'
+  env: 'test'
+  namespace: 'test'
+  tag: $(Build.BuildId)
+
+stages: 
+- stage: Create
+  displayName: Create Stage
+  jobs: 
+  - job: Create
+    displayName: Create Azure Resource
+    pool: 
+     vmImage: $(vmImageName)
+    steps: 
+    - script: |
+        az login --service-principal -u $(clientId) -p $(clientSecret) --tenant $(tenantId)
+        az group create -l $(location) -n $(rgName)
+        az acr create -g $(rgName) -n $(registryName) --sku Basic
+        az aks create -n $(clusterName) -g $(rgName) --network-plugin azure --enable-managed-identity --generate-ssh-keys
+        az aks update -n $(clusterName) -g $(rgName) --attach-acr $(registryName)
+    
+- stage: Build 
+  dependsOn: Create
+  displayName: Build Stage
+  jobs:
+  - job: Build_FE
+    displayName: Build FE Image
+    pool:
+      vmImage: $(vmImageName)
+    variables: 
+      imageName: 'demofe'
+    steps:
+    - template: ./common/fe-steps.yaml
+
+  - job: Build_BE
+    displayName: Build BE Image
+    pool:
+      vmImage: $(vmImageName)
+    variables: 
+      imageName: 'demobe'
+      dockerConn: 'DSDEMO'
+    steps:
+    - template: ./common/be-steps.yaml
+    - template: ./common/artifact-steps.yaml
+
+- stage: Deploy
+  displayName: Deploy stage
+  dependsOn: Build
+  jobs:
+  - job: DownloadAndInstall
+  - deployment: Deploy
+    displayName: Deploy
+    pool:
+      vmImage: $(vmImageName)
+      dockerConn: 'DSDEMO'
+    environment: demoBE-env.test
+    strategy:
+      runOnce:
+        deploy:
+          steps:    
+
+          - task: DownloadBuildArtifacts@1
+            displayName: 'Download Artifact'
+            inputs:
+              buildType: 'current'
+              downloadType: 'single'
+              artifactName: 'drop'
+              downloadPath: $(Build.SourcesDirectory)/bin
+
+          - task: HelmInstaller@0
+            displayName: 'Install Helm'
+            inputs:
+              helmVersion: '2.14.1'
+              installKubectl: true
+              
+          - task: AzureCLI@2
+            displayName: 'Apply Helm for Demo FE'
+            inputs:
+              azureSubscription: $(connectionName)
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                #!/bin/sh
+                clusterName=$(clusterName)
+                rgName=$(rgName)
+                appName=$(imageName)
+                tag=$(tag)  
+                namespace=$(namespace)
+                az login --service-principal -u $(clientId) -p $(clientSecret) --tenant $(tenantId)
+                az aks get-credentials --admin -n $clusterName -g $rgName
+                kubectl create namespace $namespace
+                helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+                helm repo update
+                helm install ingress-nginx ingress-nginx/ingress-nginx --namespace test --set controller.service.annotations."service\.beta\.kubernetes\.io/azure-load-balancer-health-probe-request-path"=/healthz
+                kubectl delete -A ValidatingWebhookConfiguration ingress-nginx-admission
+                helm upgrade --install demofe --set image.tag=$tag $(Build.SourcesDirectory)/bin/drop/demoFE/ci/helm -n $namespace
+
+          - task: AzureCLI@2
+            displayName: 'Apply Helm for Demo BE'
+            inputs:
+              azureSubscription: $(connectionName)
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                #!/bin/sh
+                clusterName=$(clusterName)
+                rgName=$(rgName)
+                appName=$(imageName)
+                tag=$(tag)  
+                namespace=$(namespace)
+                az login --service-principal -u $(clientId) -p $(clientSecret) --tenant $(tenantId)
+                az aks get-credentials --admin -n $clusterName -g $rgName
+                kubectl create namespace $namespace
+                helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+                helm repo update
+                helm install ingress-nginx ingress-nginx/ingress-nginx --namespace test --set controller.service.annotations."service\.beta\.kubernetes\.io/azure-load-balancer-health-probe-request-path"=/healthz
+                kubectl delete -A ValidatingWebhookConfiguration ingress-nginx-admission
+                helm upgrade --install demobe --set image.tag=$tag $(Build.SourcesDirectory)/bin/drop/demoBE/ci/helm -n $namespace
+
