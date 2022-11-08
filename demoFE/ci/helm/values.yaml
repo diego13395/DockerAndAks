@@ -1,0 +1,25 @@
+replicaCount: 1
+
+image:
+  repository: dsdemocr.azurecr.io/demofe
+  pullPolicy: IfNotPresent
+  # Overrides the image tag whose default is the chart appVersion.
+  tag: "latest"
+
+imagePullSecrets: []
+
+
+service:
+  type: LoadBalancer
+  port: 4200
+  targetPort: 30000
+
+
+resources:
+  limits:
+    cpu: 100m
+    memory: 128Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
